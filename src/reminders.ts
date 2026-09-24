@@ -41,18 +41,34 @@ export function reminderFor(task: Pick<Task, "due" | "lastReminder" | "overdueSe
 
 /** Channel post + DM(s) for one task. */
 export async function notifyTask(task: Task, payload: Parameters<typeof sendChannelMessage>[1]) {
+  // The channel post and the DMs are independent: one failing must not stop the other.
+  let channelError: unknown = null;
   const channelId = process.env.TASK_ALERTS_CHANNEL_ID;
-  if (channelId) await sendChannelMessage(channelId, payload);
+  if (!channelId) {
+    console.error("TASK_ALERTS_CHANNEL_ID is not set, so nothing is posted to #task-alerts");
+  } else {
+    try {
+      await sendChannelMessage(channelId, payload);
+    } catch (err) {
+      channelError = err;
+      console.error(`Posting to #task-alerts (channel ${channelId}) failed`, err);
+    }
+  }
 
   const dmPayload = { ...payload, allowed_mentions: { parse: [] } };
   const recipients = task.assigneeKind === "user" ? [task.assigneeId] : ((await membersWithRole(task.assigneeId)) ?? []);
+  let delivered = 0;
   for (const userId of recipients) {
     try {
-      await sendDM(userId, dmPayload);
+      if (await sendDM(userId, dmPayload)) delivered++;
+      else console.warn(`User ${userId} has DMs from server members turned off`);
     } catch (err) {
       console.error(`DM to ${userId} failed`, err);
     }
   }
+
+  // Nothing reached anyone: surface it so the daily run retries tomorrow.
+  if (channelError && delivered === 0) throw channelError;
 }
 
 export interface RunSummary {
