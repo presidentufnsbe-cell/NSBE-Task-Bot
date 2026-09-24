@@ -1,9 +1,8 @@
 # NSBE Task Bot
 
-A Discord bot for the e-board. Officers assign tasks with a slash command, the bot reminds
-people **1 week, 3 days, 1 day before, and the morning a task is due** (in `#task-alerts`
-and by DM), and people close tasks with one **✅ Mark done** button on the reminder.
-Nobody has to open another website.
+A Discord bot for the e-board. CEOs assign tasks with a slash command, the bot reminds
+people by DM **3 days and 1 day before, on the due date, and every day once overdue**, and
+people close tasks with one **✅ Mark Complete** button. Nobody has to open another website.
 
 It runs free on Vercel (Hobby plan) with a free Neon Postgres database.
 
@@ -13,24 +12,34 @@ It runs free on Vercel (Hobby plan) with a free Neon Postgres database.
 
 | Command | What it does |
 |---|---|
-| `/assign who task due [details]` | Give someone a task. `who` can be a person **or** a zone role like `@Finance Zone` (also `@CEO` or `@CEB`). `due` understands `friday`, `10/3`, `next tuesday`, `in 2 weeks`, and shows how it read your date before you hit enter. |
-| `/tasks` | Your open tasks. Add `person:` for someone else's, or `zone:` for a whole zone / the whole board. |
-| `/done task` | Mark something finished (start typing and pick it from the list). |
-| `/edit-task task …` | Change the title, due date, notes, or reassign it. Changing the date restarts the reminders. |
-| `/delete-task task` | Remove a task that's no longer needed. |
+| `/assign who task due [who-2] [who-3] [details]` | Give a task to a person or a whole zone (e.g. `@Finance Zone`). Add `who-2`/`who-3` for a shared task: everyone listed is reminded and anyone listed can complete it. `due` understands `friday`, `10/3`, `next tuesday`, `in 2 weeks`, and shows how it read your date. |
+| `/tasks` | Your open tasks. `person:` someone else's, `zone:` a zone or the whole board, `overdue:True` only overdue ones. |
+| `/view-task task` | One task's details and full history (who created, edited, completed or cancelled it). |
+| `/done task` | Mark a task complete. |
+| `/edit-task task …` | Change title, due date, notes, or who it's assigned to (new `who` replaces everyone). Changing the date restarts the reminders. |
+| `/cancel-task task [reason]` | Stop a task without completing it. It stays in the history. |
 
-Every reminder and assignment message has a **✅ Mark done** button, in the channel and in DMs.
+Every reminder DM has a **✅ Mark Complete** button.
 
-**Who can do what** (change it in `src/config.ts`):
-- **CEOs** (anyone with the `CEO` role: President, both VPs, Secretary, Treasurer, Programs Chair, Parliamentarian) can assign to anyone on the e-board, and edit, reassign, delete or close any task.
-- **Everyone else on the e-board** can create tasks for themselves, and edit or delete tasks they created.
-- A task can be closed by the person it's assigned to (or anyone holding the role, for role tasks), by whoever assigned it, or by a CEO.
-- Only people with `CEB`, `CEO` or a zone role can use the bot or be assigned tasks.
+**Who can do what** (roles set in `src/config.ts`):
+- **CEOs** (President, both VPs, Secretary, Treasurer, Programs Chair, Parliamentarian) all have the same power: assign to anyone or any zone, edit, cancel, and complete any task.
+- **Everyone else with `CEB`** can create tasks for themselves and edit or cancel tasks they created.
+- **Completing:** a person a task is assigned to by name, or any CEO. **Zone tasks** are completed by the zone head (a CEO), not by every zone member.
+- Every action is recorded, so `/view-task` shows who did what.
 
-**Reminder details**
-- If a task is created less than a week out, the "you've been assigned" message counts as the first reminder, so people don't get double-pinged. Example: a task due in 5 days gets the 3-day, 1-day and day-of reminders.
-- One "⚠️ overdue" nudge goes out the day after a task was due if it's still open (turn off with `overdueNudge: false`).
-- Reminders go out once a day, **between 9 and 10am Eastern** (8 to 9am in winter). The free Vercel plan only runs scheduled jobs once a day, at some point within the hour you choose.
+**Reminders** (9 to 10am Eastern, once a day):
+
+| When | DM | #task-alerts |
+|---|---|---|
+| New task | Yes | Zone tasks only |
+| 3 days before | Yes | No |
+| 1 day before | Yes | No |
+| Due today | Yes | Yes |
+| Overdue | Every day until done (zone tasks: the zone head) | One daily summary of all overdue tasks |
+| Completed | | Zone tasks only |
+
+If someone has DMs turned off, their reminder is posted in #task-alerts instead.
+Tasks created close to their due date skip reminders already covered by the "new task" message.
 
 ---
 
@@ -94,7 +103,7 @@ If you rename a role in Discord, change it in `config.ts` too.
 
 ### 5. Try it
 In Discord, type `/assign`, pick yourself, and set the due date to `today`. You should get a
-confirmation, a post in `#task-alerts`, and a DM. Hit **Mark done**.
+confirmation and a DM. Hit **Mark Complete**.
 
 To test the daily reminders without waiting: Vercel → project → **Settings → Cron Jobs** → **Run**.
 
@@ -103,8 +112,10 @@ To test the daily reminders without waiting: Vercel → project → **Settings �
 ## Changing things
 
 Everything you're likely to change is in **`src/config.ts`**:
-- `reminderDaysBefore`: when reminders go out (`[7, 3, 1, 0]`)
-- `overdueNudge`: the day-after nudge on/off
+- `reminderDaysBefore`: when DM reminders go out (`[3, 1, 0]`)
+- `channelDaysBefore`: which of those also go to #task-alerts (`[0]` = due today)
+- `overdueDaily`: daily overdue DMs + channel summary on/off
+- `maxAssignees`: people per task (3); run `npm run register` after changing
 - `nonExecCanAssign`: `"self"` (default), `"zone"` (chairs can assign within their zone) or `"anyone"`
 - `EXEC_ROLES`, `EBOARD_ROLES`, `ZONES`: which Discord roles mean what
 
