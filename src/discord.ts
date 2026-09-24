@@ -88,11 +88,15 @@ export function getMember(userId: string) {
 }
 
 /**
- * Everyone who has a given role. Needs the "Server Members Intent" switched on in the
- * Developer Portal; returns null if it isn't, and callers fall back to a channel ping only.
+ * Everyone in the server (bots excluded). Needs the "Server Members Intent" switched on in
+ * the Developer Portal; returns null if it isn't, and callers fall back to a channel ping only.
+ * Cached for a minute so a reminder run lists the server once, not once per task.
  */
-export async function membersWithRole(roleId: string): Promise<string[] | null> {
-  const ids: string[] = [];
+let membersCache: { at: number; members: GuildMember[] } | null = null;
+
+export async function listMembers(): Promise<GuildMember[] | null> {
+  if (membersCache && Date.now() - membersCache.at < 60_000) return membersCache.members;
+  const all: GuildMember[] = [];
   let after = "0";
   try {
     for (;;) {
@@ -100,15 +104,25 @@ export async function membersWithRole(roleId: string): Promise<string[] | null> 
         "GET",
         `/guilds/${process.env.DISCORD_GUILD_ID}/members?limit=1000&after=${after}`,
       );
-      for (const m of page) if (!m.user.bot && m.roles.includes(roleId)) ids.push(m.user.id);
+      all.push(...page.filter((m) => !m.user.bot));
       if (page.length < 1000) break;
       after = page[page.length - 1].user.id;
     }
-    return ids;
+    membersCache = { at: Date.now(), members: all };
+    return all;
   } catch (err) {
     console.warn("Could not list members (is the Server Members Intent on?)", err);
     return null;
   }
+}
+
+/** IDs of everyone with a role (and, if given, also another role). */
+export async function membersWithRole(roleId: string, alsoRoleId?: string): Promise<string[] | null> {
+  const members = await listMembers();
+  if (!members) return null;
+  return members
+    .filter((m) => m.roles.includes(roleId) && (!alsoRoleId || m.roles.includes(alsoRoleId)))
+    .map((m) => m.user.id);
 }
 
 export function displayName(user: { username: string; global_name?: string | null }, nick?: string | null) {

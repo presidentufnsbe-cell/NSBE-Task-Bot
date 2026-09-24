@@ -11,11 +11,20 @@ export const SETTINGS = {
   /** Every date is interpreted in this time zone. */
   timezone: process.env.TIMEZONE || "America/New_York",
 
-  /** Remind this many days before the due date. 0 = the morning it is due. */
-  reminderDaysBefore: [7, 3, 1, 0],
+  /** DM reminders this many days before the due date. 0 = the morning it is due. */
+  reminderDaysBefore: [3, 1, 0],
 
-  /** Send one "this is overdue" nudge the day after a task was due and still isn't done. */
-  overdueNudge: true,
+  /**
+   * Which of those reminders are ALSO posted in #task-alerts. Keeping the channel quiet
+   * (due-today only) stops people from muting it.
+   */
+  channelDaysBefore: [0],
+
+  /** Overdue tasks: DM every day until done, plus one daily overdue summary in #task-alerts. */
+  overdueDaily: true,
+
+  /** Maximum people/roles per task (/assign who, who-2, who-3). Changing this needs `npm run register`. */
+  maxAssignees: 3,
 
   /**
    * Who can assign tasks to whom.
@@ -36,8 +45,8 @@ export const SETTINGS = {
 
 /**
  * Chapter Executive Officers: President, 1st VP, 2nd VP, Treasurer, Secretary,
- * Programs Chair and Parliamentarian. They can assign tasks to anyone, and edit,
- * reassign, delete or close any task.
+ * Programs Chair and Parliamentarian. They can assign tasks to anyone, edit or cancel any task,
+ * and mark any task complete (including zone tasks).
  */
 export const EXEC_ROLES = ["CEO"];
 

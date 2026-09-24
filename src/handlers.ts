@@ -1,11 +1,21 @@
-import { ZONES } from "./config.js";
+import { SETTINGS, ZONES } from "./config.js";
 import { daysBetween, formatDate, parseDue, relativeDue, todayISO } from "./dates.js";
 import * as db from "./db.js";
-import type { Task } from "./db.js";
+import type { Assignee, Task } from "./db.js";
 import { displayName, getMember, roleNames, sendChannelMessage } from "./discord.js";
-import { assignedMessage, completedNotice, EPHEMERAL, taskChoiceName, taskEmbed, taskLine } from "./messages.js";
+import {
+  assignedMessage,
+  assigneeLabels,
+  completedNotice,
+  EPHEMERAL,
+  historyText,
+  isZoneTask,
+  taskChoiceName,
+  taskEmbed,
+  taskLine,
+} from "./messages.js";
 import { checkCanAssign, profileFromRoleNames, zonesForTarget, type Profile, type Target } from "./permissions.js";
-import { initialReminderMark, notifyTask } from "./reminders.js";
+import { deliver, initialReminderMark } from "./reminders.js";
 
 // Discord interaction + response type numbers.
 const PING = 1,
@@ -17,7 +27,7 @@ const R_PONG = 1,
   R_UPDATE = 7,
   R_CHOICES = 8;
 
-/** Run work after the response has been sent (Discord needs an answer within 3 seconds). */
+/** Work to finish before/after the reply (sending notifications). */
 export type Defer = (work: Promise<unknown>) => void;
 
 const reply = (content: string, extra: object = {}) => ({
@@ -47,27 +57,57 @@ function options(i: any): Record<string, any> {
   return out;
 }
 
-async function resolveTarget(i: any, id: string): Promise<{ target: Target; label: string } | { error: string }> {
+const WHO_OPTIONS = ["who", ...Array.from({ length: SETTINGS.maxAssignees - 1 }, (_, n) => `who-${n + 2}`)];
+
+async function resolveTarget(i: any, id: string): Promise<{ target: Target; assignee: Assignee } | { error: string }> {
   const role = i.data?.resolved?.roles?.[id];
-  if (role) return { target: { kind: "role", id, name: role.name }, label: `@${role.name}` };
+  if (role) return { target: { kind: "role", id, name: role.name }, assignee: { kind: "role", id, label: `@${role.name}` } };
 
   const user = i.data?.resolved?.users?.[id];
   const member = i.data?.resolved?.members?.[id];
   if (!user) return { error: "I couldn't find that person." };
   if (user.bot) return { error: "Bots can't be assigned tasks." };
-  if (!member) return { error: "That person isn't in this server." };
+  if (!member) return { error: `<@${id}> isn't in this server.` };
   const profile = profileFromRoleNames(await roleNames(member.roles ?? []));
-  return { target: { kind: "user", id, profile }, label: displayName(user, member.nick) };
+  return { target: { kind: "user", id, profile }, assignee: { kind: "user", id, label: displayName(user, member.nick) } };
 }
 
+/** Reads who / who-2 / who-3, checks each one, and returns the assignee list. */
+async function readAssignees(
+  i: any,
+  actor: Actor,
+): Promise<{ assignees: Assignee[]; zones: string[] } | { error: string } | null> {
+  const o = options(i);
+  const ids = [...new Set(WHO_OPTIONS.map((n) => o[n]?.value).filter(Boolean) as string[])];
+  if (!ids.length) return null;
+  const assignees: Assignee[] = [];
+  const zones: string[] = [];
+  for (const id of ids) {
+    const r = await resolveTarget(i, id);
+    if ("error" in r) return r;
+    const denied = checkCanAssign(actor.id, actor.profile, r.target);
+    if (denied) return { error: ids.length > 1 ? `**${r.assignee.label}:** ${denied}` : denied };
+    assignees.push(r.assignee);
+    zones.push(...zonesForTarget(r.target));
+  }
+  return { assignees, zones };
+}
+
+/** CEOs, and whoever created the task, can edit or cancel it. */
 function canManage(actor: Actor, task: Task) {
   return actor.profile.isExec || task.createdBy === actor.id;
 }
 
-function canClose(actor: Actor, task: Task) {
-  const isAssignee =
-    task.assigneeKind === "user" ? task.assigneeId === actor.id : actor.roleIds.includes(task.assigneeId);
-  return isAssignee || canManage(actor, task);
+/**
+ * Completing: any CEO, or a person the task is assigned to by name.
+ * Zone tasks (assigned to a whole zone role) are completed by the zone head, who is a CEO.
+ */
+function closeDenied(actor: Actor, task: Task): string | null {
+  if (actor.profile.isExec) return null;
+  if (task.assignees.some((a) => a.kind === "user" && a.id === actor.id)) return null;
+  if (task.assignees.some((a) => a.kind === "role" && actor.roleIds.includes(a.id)))
+    return `**#${task.id}** is a zone task, so your zone head (or any CEO) marks it complete.`;
+  return `Only the people assigned to **#${task.id}**, or a CEO, can mark it complete.`;
 }
 
 const DATE_HELP = "Try something like `friday`, `10/3`, `next tuesday`, `in 2 weeks`, or `2026-10-03`.";
@@ -81,6 +121,10 @@ function readDue(raw: string, now: Date): { due: string } | { error: string } {
 
 const alertsChannel = () => process.env.TASK_ALERTS_CHANNEL_ID;
 
+function notified(task: Task) {
+  return isZoneTask(task) ? `They've been notified by DM and in <#${alertsChannel()}>.` : "They've been notified by DM.";
+}
+
 // ---------------------------------------------------------------- commands
 
 async function assign(i: any, actor: Actor, defer: Defer, now: Date) {
@@ -88,50 +132,52 @@ async function assign(i: any, actor: Actor, defer: Defer, now: Date) {
   const due = readDue(o.due.value, now);
   if ("error" in due) return reply(due.error);
 
-  const resolved = await resolveTarget(i, o.who.value);
-  if ("error" in resolved) return reply(resolved.error);
-  const denied = checkCanAssign(actor.id, actor.profile, resolved.target);
-  if (denied) return reply(denied);
+  const who = await readAssignees(i, actor);
+  if (!who) return reply("Pick who the task is for.");
+  if ("error" in who) return reply(who.error);
 
   const days = daysBetween(todayISO(now), due.due);
   const task = await db.createTask({
     title: o.task.value.trim(),
     details: o.details?.value?.trim() || null,
     due: due.due,
-    assigneeKind: resolved.target.kind,
-    assigneeId: resolved.target.id,
-    assigneeLabel: resolved.label,
-    zones: zonesForTarget(resolved.target),
+    assignees: who.assignees,
+    zones: who.zones,
     createdBy: actor.id,
     lastReminder: initialReminderMark(days),
   });
-  defer(notifyTask(task, assignedMessage(task, "assigned", now)));
+  // Individual tasks: DM only. Zone tasks are "zone activity", so they also go to #task-alerts.
+  defer(deliver(task, (b) => assignedMessage(task, "assigned", now, b), { channel: isZoneTask(task) }));
 
   return reply(
-    `Created **#${task.id}** for **${resolved.label}**, due **${formatDate(task.due, now)}** (${relativeDue(days)}). ` +
-      `They've been notified${alertsChannel() ? ` in <#${alertsChannel()}>` : ""} and by DM.`,
+    `Created **#${task.id}** for **${assigneeLabels(task)}**, due **${formatDate(task.due, now)}** (${relativeDue(days)}). ${notified(task)}`,
   );
 }
 
 async function listTasks(i: any, actor: Actor, now: Date) {
   const o = options(i);
+  const overdue = !!o.overdue?.value;
+  const dueBefore = overdue ? todayISO(now) : undefined;
   let tasks: Task[];
   let heading: string;
 
   if (o.zone) {
     const zone = ZONES.find((z) => z.key === o.zone.value);
-    tasks = await db.listOpenTasks({ zone: zone?.key });
-    heading = zone ? `Open tasks in the ${zone.name}` : "All open e-board tasks";
+    tasks = await db.listOpenTasks({ zone: zone?.key, dueBefore });
+    heading = zone ? `${overdue ? "Overdue" : "Open"} tasks in the ${zone.name}` : `All ${overdue ? "overdue" : "open"} e-board tasks`;
   } else if (o.person) {
     const member = i.data.resolved?.members?.[o.person.value];
-    tasks = await db.listOpenTasks({ userId: o.person.value, roleIds: member?.roles ?? [] });
-    heading = `Open tasks for <@${o.person.value}>`;
+    tasks = await db.listOpenTasks({ userId: o.person.value, roleIds: member?.roles ?? [], dueBefore });
+    heading = `${overdue ? "Overdue" : "Open"} tasks for <@${o.person.value}>`;
+  } else if (overdue) {
+    tasks = await db.listOpenTasks({ dueBefore });
+    heading = "All overdue e-board tasks";
   } else {
     tasks = await db.listOpenTasks({ userId: actor.id, roleIds: actor.roleIds });
     heading = "Your open tasks";
   }
 
-  if (!tasks.length) return reply(`**${heading}:** nothing open. 🎉`);
+  if (!tasks.length) return reply(`**${heading}:** nothing ${overdue ? "overdue" : "open"}. 🎉`);
 
   let out = `**${heading}** (${tasks.length})\n`;
   let shown = 0;
@@ -142,39 +188,59 @@ async function listTasks(i: any, actor: Actor, now: Date) {
     shown++;
   }
   if (shown < tasks.length) out += `…and ${tasks.length - shown} more.\n`;
-  out += "\nFinished one? Use `/done` or hit **Mark done** on its reminder.";
+  out += "\n`/view-task` for details · `/done` or **Mark Complete** when finished.";
   return reply(out);
 }
 
-async function finish(actor: Actor, task: Task | null, defer: Defer, fromChannel: string | undefined) {
-  if (!task) return { error: "That task doesn't exist (it may have been deleted)." };
+async function viewTask(i: any, now: Date) {
+  const task = await db.getTask(options(i).task.value);
+  if (!task) return reply("That task doesn't exist.");
+  const events = await db.getEvents(task.id);
+  return reply(`**History of #${task.id}**\n${historyText(events)}`.slice(0, 2000), { embeds: [taskEmbed(task, now)] });
+}
+
+async function finish(actor: Actor, task: Task | null) {
+  if (!task) return { error: "That task doesn't exist." };
+  if (task.status === "cancelled") return { error: `**#${task.id}** was cancelled.` };
   if (task.status === "done") return { already: task };
-  if (!canClose(actor, task))
-    return { error: `Only the person assigned to **#${task.id}**, whoever assigned it, or a CEO can close it.` };
+  const denied = closeDenied(actor, task);
+  if (denied) return { error: denied };
   const done = await db.completeTask(task.id, actor.id);
   if (!done) return { already: (await db.getTask(task.id)) ?? task };
-  const channel = alertsChannel();
-  if (channel && fromChannel !== channel) defer(sendChannelMessage(channel, completedNotice(done, actor.id)));
   return { done };
 }
 
+/** Zone-task completions are announced in #task-alerts (unless the click happened there). */
+function announceCompletion(task: Task, actorId: string, defer: Defer, fromChannel: string | undefined, force = false) {
+  const channel = alertsChannel();
+  if (!channel) return;
+  if (force || (isZoneTask(task) && fromChannel !== channel)) defer(sendChannelMessage(channel, completedNotice(task, actorId)));
+}
+
 async function doneCommand(i: any, actor: Actor, defer: Defer) {
-  const task = await db.getTask(options(i).task.value);
-  const r = await finish(actor, task, defer, undefined);
+  const r = await finish(actor, await db.getTask(options(i).task.value));
   if ("error" in r) return reply(r.error!);
-  if ("already" in r) return reply(`**#${r.already!.id}** was already marked done.`);
-  return reply(`✅ Marked **#${r.done!.id} · ${r.done!.title}** as done. Nice work!`);
+  if ("already" in r) return reply(`**#${r.already!.id}** was already marked complete.`);
+  announceCompletion(r.done!, actor.id, defer, i.channel_id);
+  return reply(`✅ Marked **#${r.done!.id} · ${r.done!.title}** complete. Nice work!`);
 }
 
 async function editTask(i: any, actor: Actor, defer: Defer, now: Date) {
   const o = options(i);
   const task = await db.getTask(o.task.value);
-  if (!task || task.status !== "open") return reply("That task doesn't exist or is already done.");
+  if (!task || task.status !== "open") return reply("That task doesn't exist or is already closed.");
   if (!canManage(actor, task)) return reply("Only whoever assigned this task, or a CEO, can edit it.");
 
   const update: db.TaskUpdate = {};
-  if (o["task-name"]) update.title = o["task-name"].value.trim();
-  if (o.details) update.details = o.details.value.trim() === "-" ? null : o.details.value.trim();
+  const changes: string[] = [];
+  if (o["task-name"]) {
+    update.title = o["task-name"].value.trim();
+    changes.push(`title "${task.title}" → "${update.title}"`);
+  }
+  if (o.details) {
+    update.details = o.details.value.trim() === "-" ? null : o.details.value.trim();
+    changes.push(update.details ? "details changed" : "details cleared");
+  }
 
   let dueChanged = false;
   if (o.due) {
@@ -183,42 +249,49 @@ async function editTask(i: any, actor: Actor, defer: Defer, now: Date) {
     if (due.due !== task.due) {
       update.due = due.due;
       update.lastReminder = initialReminderMark(daysBetween(todayISO(now), due.due));
-      update.overdueSent = false;
+      update.lastOverdue = null;
+      changes.push(`due ${task.due} → ${due.due}`);
       dueChanged = true;
     }
   }
 
   let reassigned = false;
-  if (o.who) {
-    const resolved = await resolveTarget(i, o.who.value);
-    if ("error" in resolved) return reply(resolved.error);
-    const denied = checkCanAssign(actor.id, actor.profile, resolved.target);
-    if (denied) return reply(denied);
-    if (resolved.target.id !== task.assigneeId) {
-      Object.assign(update, {
-        assigneeKind: resolved.target.kind,
-        assigneeId: resolved.target.id,
-        assigneeLabel: resolved.label,
-        zones: zonesForTarget(resolved.target),
-      });
+  const who = await readAssignees(i, actor);
+  if (who && "error" in who) return reply(who.error);
+  if (who) {
+    const before = task.assignees.map((a) => a.id).sort().join();
+    const after = who.assignees.map((a) => a.id).sort().join();
+    if (before !== after) {
+      update.assignees = who.assignees;
+      update.zones = who.zones;
+      changes.push(`assigned to ${assigneeLabels(task)} → ${who.assignees.map((a) => a.label).join(", ")}`);
       reassigned = true;
     }
   }
 
-  if (!Object.keys(update).length) return reply("Nothing to change. Pick at least one field to edit.");
+  if (!changes.length) return reply("Nothing to change. Pick at least one field to edit.");
   const updated = (await db.updateTask(task.id, update))!;
+  await db.logEvent(task.id, actor.id, "edited", changes.join("; "));
 
-  if (reassigned || dueChanged) defer(notifyTask(updated, assignedMessage(updated, reassigned ? "reassigned" : "updated", now)));
-  const note = reassigned ? " The new assignee has been notified." : dueChanged ? " The assignee has been told about the new date." : "";
+  if (reassigned || dueChanged) {
+    defer(
+      deliver(updated, (b) => assignedMessage(updated, reassigned ? "reassigned" : "updated", now, b), {
+        channel: isZoneTask(updated),
+      }),
+    );
+  }
+  const note = reassigned ? " The new assignees have been notified." : dueChanged ? " The assignees have been told about the new date." : "";
   return reply(`Updated **#${updated.id}**.${note}`, { embeds: [taskEmbed(updated, now)] });
 }
 
-async function deleteTask(i: any, actor: Actor) {
-  const task = await db.getTask(options(i).task.value);
+async function cancelTask(i: any, actor: Actor) {
+  const o = options(i);
+  const task = await db.getTask(o.task.value);
   if (!task) return reply("That task doesn't exist.");
-  if (!canManage(actor, task)) return reply("Only whoever assigned this task, or a CEO, can delete it.");
-  await db.deleteTask(task.id);
-  return reply(`🗑️ Deleted **#${task.id} · ${task.title}**.`);
+  if (task.status !== "open") return reply(`**#${task.id}** is already ${task.status === "done" ? "complete" : "cancelled"}.`);
+  if (!canManage(actor, task)) return reply("Only whoever assigned this task, or a CEO, can cancel it.");
+  await db.cancelTask(task.id, actor.id, o.reason?.value?.trim() || null);
+  return reply(`🚫 Cancelled **#${task.id} · ${task.title}**. It won't send any more reminders, and it stays in the history.`);
 }
 
 // ---------------------------------------------------------------- autocomplete
@@ -239,8 +312,13 @@ function dueChoices(value: string, now: Date) {
 
 async function taskChoices(i: any, actor: Actor, search: string, now: Date) {
   const lists: Task[][] = [];
-  if (i.data.name === "done") lists.push(await db.listOpenTasks({ userId: actor.id, roleIds: actor.roleIds, search, limit: 25 }));
-  lists.push(await db.listOpenTasks(actor.profile.isExec ? { search, limit: 25 } : { createdBy: actor.id, search, limit: 25 }));
+  const cmd = i.data.name;
+  const all = { search, limit: 25 };
+  if (cmd === "view-task") lists.push(await db.listOpenTasks(all));
+  else {
+    if (cmd === "done") lists.push(await db.listOpenTasks({ userId: actor.id, roleIds: actor.roleIds, ...all }));
+    lists.push(await db.listOpenTasks(actor.profile.isExec ? all : { createdBy: actor.id, ...all }));
+  }
 
   const seen = new Set<number>();
   const choices = [];
@@ -263,16 +341,25 @@ async function autocomplete(i: any, now: Date) {
 // ---------------------------------------------------------------- buttons
 
 async function button(i: any, defer: Defer, now: Date) {
-  const [action, rawId] = String(i.data.custom_id).split(":");
+  const [action, rawId, source] = String(i.data.custom_id).split(":");
   if (action !== "done") return reply("Unknown button.");
   const actor = await getActor(i);
-  const r = await finish(actor, await db.getTask(Number(rawId)), defer, i.channel_id);
+  const r = await finish(actor, await db.getTask(Number(rawId)));
   if ("error" in r) return reply(r.error!);
+
+  // Buttons on the daily overdue summary: keep the summary as is, confirm privately, tell the channel.
+  if (source === "digest") {
+    if ("already" in r) return reply(`**#${r.already!.id}** was already marked complete.`);
+    announceCompletion(r.done!, actor.id, defer, i.channel_id, true);
+    return reply(`✅ Marked **#${r.done!.id} · ${r.done!.title}** complete.`);
+  }
+
   const task = "done" in r ? r.done! : r.already!;
+  if ("done" in r) announceCompletion(task, actor.id, defer, i.channel_id);
   return {
     type: R_UPDATE,
     data: {
-      content: `✅ Done${task.completedBy ? `, completed by <@${task.completedBy}>` : ""}.`,
+      content: `✅ Completed${task.completedBy ? ` by <@${task.completedBy}>` : ""}.`,
       embeds: [taskEmbed(task, now)],
       components: [],
       allowed_mentions: { parse: [] },
@@ -300,14 +387,16 @@ export async function handleInteraction(i: any, defer: Defer, now = new Date()):
         return await assign(i, actor, defer, now);
       case "tasks":
         return await listTasks(i, actor, now);
+      case "view-task":
+        return await viewTask(i, now);
       case "done":
         return await doneCommand(i, actor, defer);
       case "edit-task":
         return await editTask(i, actor, defer, now);
-      case "delete-task":
-        return await deleteTask(i, actor);
+      case "cancel-task":
+        return await cancelTask(i, actor);
       default:
-        return reply("Unknown command.");
+        return reply("That command was removed. Try `/cancel-task` or `/tasks`.");
     }
   } catch (err) {
     console.error("Interaction failed", err);
