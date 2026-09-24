@@ -1,0 +1,26 @@
+{
+  "name": "nsbe-task-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Discord task + reminder bot for the NSBE e-board, hosted on Vercel",
+  "engines": { "node": "22.x" },
+  "scripts": {
+    "register": "tsx scripts/register-commands.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
+    "@vercel/functions": "^3.1.0",
+    "chrono-node": "^2.9.0",
+    "discord-interactions": "^4.4.0"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "~5.9.0",
+    "vitest": "^3.2.0"
+  }
+}
