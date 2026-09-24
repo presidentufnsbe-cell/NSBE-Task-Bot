@@ -47,7 +47,7 @@ export function taskEmbed(task: Task, now = new Date()) {
   if (task.status === "cancelled" && task.cancelledBy) fields.push({ name: "Cancelled by", value: `<@${task.cancelledBy}>`, inline: true });
   const prefix = task.status === "done" ? "✅ " : task.status === "cancelled" ? "🚫 " : "";
   return {
-    title: `${prefix}#${task.id} · ${task.title}`.slice(0, 256),
+    title: `${prefix}${task.title}`.slice(0, 256),
     description: task.details ?? undefined,
     color,
     fields,
@@ -101,11 +101,14 @@ export function reminderMessage(task: Task, days: number, now = new Date(), with
   };
 }
 
+/** Button labels max out at 80 characters; keep them short enough to scan. */
+const shortTitle = (title: string) => (title.length > 30 ? title.slice(0, 29) + "…" : title);
+
 /** One daily #task-alerts post listing every overdue task, with a complete button for each (max 25). */
 export function overdueDigest(tasks: Task[], now = new Date()): MessagePayload {
   const today = todayISO(now);
   const lines = tasks.map(
-    (t) => `• **#${t.id} · ${t.title}** · ${mentions(t)} · ${relativeDue(daysBetween(today, t.due))}`,
+    (t) => `• **${t.title}** · ${mentions(t)} · ${relativeDue(daysBetween(today, t.due))}`,
   );
   let content = `⚠️ **Overdue tasks (${tasks.length})**\n`;
   for (const [n, line] of lines.entries()) {
@@ -116,7 +119,7 @@ export function overdueDigest(tasks: Task[], now = new Date()): MessagePayload {
     content += line + "\n";
   }
   const buttons = tasks.slice(0, 25).map((t) => ({
-    type: 2, style: 2, label: `#${t.id}`, emoji: { name: "✅" }, custom_id: `done:${t.id}:digest`,
+    type: 2, style: 2, label: shortTitle(t.title), emoji: { name: "✅" }, custom_id: `done:${t.id}:digest`,
   }));
   const rows = [];
   for (let i = 0; i < buttons.length; i += 5) rows.push({ type: 1, components: buttons.slice(i, i + 5) });
@@ -126,14 +129,14 @@ export function overdueDigest(tasks: Task[], now = new Date()): MessagePayload {
 }
 
 export function completedNotice(task: Task, byUserId: string): MessagePayload {
-  return { content: `✅ <@${byUserId}> completed **#${task.id} · ${task.title}**.`, allowed_mentions: { parse: [] } };
+  return { content: `✅ <@${byUserId}> completed **${task.title}**.`, allowed_mentions: { parse: [] } };
 }
 
 /** One line per task, for /tasks. */
 export function taskLine(task: Task, now = new Date()): string {
   const days = daysBetween(todayISO(now), task.due);
   const flag = days < 0 ? "🔴" : days <= 1 ? "🟠" : "🔵";
-  return `${flag} **#${task.id}** ${task.title} · ${mentions(task)} · ${formatDate(task.due, now)} (${relativeDue(days)})`;
+  return `${flag} **${task.title}** · ${mentions(task)} · ${formatDate(task.due, now)} (${relativeDue(days)}) · #${task.id}`;
 }
 
 /** Short label for autocomplete menus (max 100 chars). */

@@ -106,8 +106,8 @@ function closeDenied(actor: Actor, task: Task): string | null {
   if (actor.profile.isExec) return null;
   if (task.assignees.some((a) => a.kind === "user" && a.id === actor.id)) return null;
   if (task.assignees.some((a) => a.kind === "role" && actor.roleIds.includes(a.id)))
-    return `**#${task.id}** is a zone task, so your zone head (or any CEO) marks it complete.`;
-  return `Only the people assigned to **#${task.id}**, or a CEO, can mark it complete.`;
+    return `**${task.title}** is a zone task, so your zone head (or any CEO) marks it complete.`;
+  return `Only the people assigned to **${task.title}**, or a CEO, can mark it complete.`;
 }
 
 const DATE_HELP = "Try something like `friday`, `10/3`, `next tuesday`, `in 2 weeks`, or `2026-10-03`.";
@@ -150,7 +150,7 @@ async function assign(i: any, actor: Actor, defer: Defer, now: Date) {
   defer(deliver(task, (b) => assignedMessage(task, "assigned", now, b), { channel: isZoneTask(task) }));
 
   return reply(
-    `Created **#${task.id}** for **${assigneeLabels(task)}**, due **${formatDate(task.due, now)}** (${relativeDue(days)}). ${notified(task)}`,
+    `Created **${task.title}** for **${assigneeLabels(task)}**, due **${formatDate(task.due, now)}** (${relativeDue(days)}). ${notified(task)}`,
   );
 }
 
@@ -196,12 +196,12 @@ async function viewTask(i: any, now: Date) {
   const task = await db.getTask(options(i).task.value);
   if (!task) return reply("That task doesn't exist.");
   const events = await db.getEvents(task.id);
-  return reply(`**History of #${task.id}**\n${historyText(events)}`.slice(0, 2000), { embeds: [taskEmbed(task, now)] });
+  return reply(`**History of #${task.id} · ${task.title}**\n${historyText(events)}`.slice(0, 2000), { embeds: [taskEmbed(task, now)] });
 }
 
 async function finish(actor: Actor, task: Task | null) {
   if (!task) return { error: "That task doesn't exist." };
-  if (task.status === "cancelled") return { error: `**#${task.id}** was cancelled.` };
+  if (task.status === "cancelled") return { error: `**${task.title}** was cancelled.` };
   if (task.status === "done") return { already: task };
   const denied = closeDenied(actor, task);
   if (denied) return { error: denied };
@@ -220,9 +220,9 @@ function announceCompletion(task: Task, actorId: string, defer: Defer, fromChann
 async function doneCommand(i: any, actor: Actor, defer: Defer) {
   const r = await finish(actor, await db.getTask(options(i).task.value));
   if ("error" in r) return reply(r.error!);
-  if ("already" in r) return reply(`**#${r.already!.id}** was already marked complete.`);
+  if ("already" in r) return reply(`**${r.already!.title}** was already marked complete.`);
   announceCompletion(r.done!, actor.id, defer, i.channel_id);
-  return reply(`✅ Marked **#${r.done!.id} · ${r.done!.title}** complete. Nice work!`);
+  return reply(`✅ Marked **${r.done!.title}** complete. Nice work!`);
 }
 
 async function editTask(i: any, actor: Actor, defer: Defer, now: Date) {
@@ -281,17 +281,17 @@ async function editTask(i: any, actor: Actor, defer: Defer, now: Date) {
     );
   }
   const note = reassigned ? " The new assignees have been notified." : dueChanged ? " The assignees have been told about the new date." : "";
-  return reply(`Updated **#${updated.id}**.${note}`, { embeds: [taskEmbed(updated, now)] });
+  return reply(`Updated **${updated.title}**.${note}`, { embeds: [taskEmbed(updated, now)] });
 }
 
 async function cancelTask(i: any, actor: Actor) {
   const o = options(i);
   const task = await db.getTask(o.task.value);
   if (!task) return reply("That task doesn't exist.");
-  if (task.status !== "open") return reply(`**#${task.id}** is already ${task.status === "done" ? "complete" : "cancelled"}.`);
+  if (task.status !== "open") return reply(`**${task.title}** is already ${task.status === "done" ? "complete" : "cancelled"}.`);
   if (!canManage(actor, task)) return reply("Only whoever assigned this task, or a CEO, can cancel it.");
   await db.cancelTask(task.id, actor.id, o.reason?.value?.trim() || null);
-  return reply(`🚫 Cancelled **#${task.id} · ${task.title}**. It won't send any more reminders, and it stays in the history.`);
+  return reply(`🚫 Cancelled **${task.title}**. It won't send any more reminders, and it stays in the history.`);
 }
 
 // ---------------------------------------------------------------- autocomplete
@@ -349,9 +349,9 @@ async function button(i: any, defer: Defer, now: Date) {
 
   // Buttons on the daily overdue summary: keep the summary as is, confirm privately, tell the channel.
   if (source === "digest") {
-    if ("already" in r) return reply(`**#${r.already!.id}** was already marked complete.`);
+    if ("already" in r) return reply(`**${r.already!.title}** was already marked complete.`);
     announceCompletion(r.done!, actor.id, defer, i.channel_id, true);
-    return reply(`✅ Marked **#${r.done!.id} · ${r.done!.title}** complete.`);
+    return reply(`✅ Marked **${r.done!.title}** complete.`);
   }
 
   const task = "done" in r ? r.done! : r.already!;
